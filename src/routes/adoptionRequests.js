@@ -46,6 +46,21 @@ const SELECT_BASE = `
   LEFT JOIN meetings m ON m.adoption_request_id = r.id
 `;
 
+// ---------- Public : vérification avant de remplir le formulaire ----------
+// Retour Sophie : une famille qui a déjà 2 demandes en cours doit le savoir *avant* de remplir
+// tout le formulaire, pas seulement se voir refuser à l'envoi. Ne renvoie qu'un compte, aucune
+// donnée personnelle, pour rester accessible sans authentification.
+router.get("/check", async (req, res) => {
+  const email = (req.query.email || "").toLowerCase().trim();
+  if (!email) return res.status(400).json({ error: "email requis." });
+  const { rows } = await db.query(
+    `SELECT count(*)::int AS n FROM adoption_requests WHERE email = $1 AND status = ANY($2)`,
+    [email, ACTIVE_STATUSES]
+  );
+  const activeCount = rows[0].n;
+  res.json({ activeCount, blocked: activeCount >= 2 });
+});
+
 // ---------- Public : déposer une demande ----------
 router.post("/", async (req, res) => {
   const b = req.body || {};

@@ -5,8 +5,12 @@ const { requireAuth, requireRole } = require("../middleware/auth");
 const router = express.Router();
 const CAN_MANAGE = ["ADMINISTRATOR", "ADOPTION_MANAGER", "STAFF"];
 
-// Rencontres uniquement le samedi, par créneaux de 30 min, 2 familles max par créneau.
-const SLOTS = ["10:00", "10:30", "11:00", "11:30", "14:00", "14:30", "15:00", "15:30", "16:00"];
+// Rencontres uniquement le samedi, par créneaux de 30 min, entre 10h et 17h30 (retour Sophie),
+// 2 familles max par créneau.
+const SLOTS = [
+  "10:00", "10:30", "11:00", "11:30", "12:00", "12:30", "13:00", "13:30",
+  "14:00", "14:30", "15:00", "15:30", "16:00", "16:30", "17:00", "17:30",
+];
 const MAX_PER_SLOT = 2;
 
 function isSaturday(dateStr) {

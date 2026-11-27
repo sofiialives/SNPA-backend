@@ -4,6 +4,11 @@ const { requireAuth, requireRole } = require("../middleware/auth");
 
 const router = express.Router();
 
+// Frais d'adoption forfaitaires par type d'animal, demandés par Sophie (inclut vaccins, puce,
+// stérilisation). Pas de colonne dédiée en base : un forfait par type suffit pour le moment,
+// et évite une migration pour un montant qui ne varie pas par animal.
+const ADOPTION_FEES = { CHIEN: 250, CHAT: 150, AUTRE: 50 };
+
 function mapAnimal(row) {
   return {
     id: row.id,
@@ -26,19 +31,23 @@ function mapAnimal(row) {
     walkBanReason: row.walk_ban_reason,
     status: row.status,
     arrivedAt: row.arrived_at,
+    adoptionFee: ADOPTION_FEES[row.type] ?? null,
   };
 }
 
 // ---------- Public ----------
 
 // GET /api/animals?type=CHIEN&enfants=OUI&chats=OUI&chiens=OUI&sort=waiting
+// Remarque (retour Sophie) : les animaux "En soins" doivent rester visibles sur le site public
+// (avec une mention dédiée côté frontend, sans bouton de demande d'adoption) — seuls les animaux
+// déjà adoptés sont donc exclus par défaut.
 router.get("/", async (req, res) => {
   const { type, enfants, chats, chiens, sort, publicOnly } = req.query;
   const conditions = [];
   const params = [];
 
   if (publicOnly !== "false") {
-    conditions.push(`status IN ('DISPONIBLE','RESERVE')`);
+    conditions.push(`status IN ('DISPONIBLE','RESERVE','EN_SOINS')`);
   }
   if (type && type !== "TOUS") {
     params.push(type);
@@ -146,6 +155,78 @@ router.patch("/:id/walk-ban", requireAuth, requireRole("VETERINARIAN", "ADMINIST
 router.delete("/:id", requireAuth, requireRole("ADMINISTRATOR"), async (req, res) => {
   await db.query("DELETE FROM animals WHERE id = $1", [req.params.id]);
   res.status(204).end();
+});
+
+// ---------- Photos (retour Sophie : Inès ajoute les photos depuis son téléphone, au refuge —
+// il fallait un vrai envoi de fichier, pas un champ "lien vers une image"). ----------
+//
+// Stockage en base (colonne photos TEXT[] déjà existante), en data URL base64 : Render ne garantit
+// pas de disque persistant entre déploiements, et ceci évite d'ajouter un service de stockage
+// externe pour cette première version. Limite volontaire à 5 Mo par photo pour rester raisonnable
+// en taille de base de données.
+const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
+
+function isValidPhotoDataUrl(dataUrl) {
+  return typeof dataUrl === "string" && /^data:image\/(png|jpe?g|webp|gif);base64,/.test(dataUrl);
+}
+
+// POST /api/animals/:id/photos { dataUrl } — ajoute une photo (et la définit comme photo
+// principale si l'animal n'en a pas encore).
+router.post("/:id/photos", requireAuth, requireRole(...CAN_MANAGE_ANIMALS), async (req, res) => {
+  const { dataUrl } = req.body || {};
+  if (!isValidPhotoDataUrl(dataUrl)) {
+    return res.status(400).json({ error: "Photo invalide (formats acceptés : JPG, PNG, WEBP, GIF)." });
+  }
+  if (Buffer.byteLength(dataUrl, "utf8") > MAX_PHOTO_BYTES * 1.4) {
+    // le base64 gonfle la taille d'environ 1.37x ; marge pour rester proche de 5 Mo réels
+    return res.status(413).json({ error: "Photo trop volumineuse (5 Mo maximum)." });
+  }
+
+  const { rows: cur } = await db.query("SELECT * FROM animals WHERE id = $1", [req.params.id]);
+  if (!cur[0]) return res.status(404).json({ error: "Animal introuvable." });
+
+  const { rows } = await db.query(
+    `UPDATE animals
+       SET photos = array_append(photos, $1),
+           main_photo_url = COALESCE(main_photo_url, $1),
+           updated_at = now()
+     WHERE id = $2 RETURNING *`,
+    [dataUrl, req.params.id]
+  );
+  res.status(201).json({ animal: mapAnimal(rows[0]) });
+});
+
+// PATCH /api/animals/:id/main-photo { url } — définit une photo déjà envoyée comme photo principale.
+router.patch("/:id/main-photo", requireAuth, requireRole(...CAN_MANAGE_ANIMALS), async (req, res) => {
+  const { url } = req.body || {};
+  const { rows: cur } = await db.query("SELECT * FROM animals WHERE id = $1", [req.params.id]);
+  if (!cur[0]) return res.status(404).json({ error: "Animal introuvable." });
+  if (url && !(cur[0].photos || []).includes(url)) {
+    return res.status(400).json({ error: "Cette photo ne fait pas partie des photos de cet animal." });
+  }
+  const { rows } = await db.query(
+    `UPDATE animals SET main_photo_url = $1, updated_at = now() WHERE id = $2 RETURNING *`,
+    [url || null, req.params.id]
+  );
+  res.json({ animal: mapAnimal(rows[0]) });
+});
+
+// DELETE /api/animals/:id/photos { url } — retire une photo (et réaffecte la photo principale
+// si besoin).
+router.delete("/:id/photos", requireAuth, requireRole(...CAN_MANAGE_ANIMALS), async (req, res) => {
+  const { url } = req.body || {};
+  if (!url) return res.status(400).json({ error: "url requise." });
+  const { rows: cur } = await db.query("SELECT * FROM animals WHERE id = $1", [req.params.id]);
+  if (!cur[0]) return res.status(404).json({ error: "Animal introuvable." });
+
+  const remaining = (cur[0].photos || []).filter((p) => p !== url);
+  const nextMain = cur[0].main_photo_url === url ? remaining[0] || null : cur[0].main_photo_url;
+
+  const { rows } = await db.query(
+    `UPDATE animals SET photos = $1, main_photo_url = $2, updated_at = now() WHERE id = $3 RETURNING *`,
+    [remaining, nextMain, req.params.id]
+  );
+  res.json({ animal: mapAnimal(rows[0]) });
 });
 
 module.exports = router;
